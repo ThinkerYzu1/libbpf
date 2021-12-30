@@ -2872,6 +2872,7 @@ static int btf_dedup_prep(struct btf_dedup *d);
 static int btf_dedup_strings(struct btf_dedup *d);
 static int btf_dedup_prim_types(struct btf_dedup *d);
 static int btf_dedup_struct_types(struct btf_dedup *d);
+static int btf_dedup_fwd_types(struct btf_dedup *d);
 static int btf_dedup_ref_types(struct btf_dedup *d);
 static int btf_dedup_compact_types(struct btf_dedup *d);
 static int btf_dedup_remap_types(struct btf_dedup *d);
@@ -3052,6 +3053,11 @@ int btf__dedup_v0_6_0(struct btf *btf, const struct btf_dedup_opts *opts)
 	err = btf_dedup_struct_types(d);
 	if (err < 0) {
 		pr_debug("btf_dedup_struct_types failed:%d\n", err);
+		goto done;
+	}
+	err = btf_dedup_fwd_types(d);
+	if (err < 0) {
+		pr_debug("btf_dedup_fwd_types failed:%d\n", err);
 		goto done;
 	}
 	err = btf_dedup_ref_types(d);
@@ -4269,6 +4275,62 @@ static int btf_dedup_struct_types(struct btf_dedup *d)
 		if (err)
 			return err;
 	}
+	return 0;
+}
+
+static int btf_dedup_fwd_type(struct btf_dedup *d, __u32 type_id, struct hashmap *dedup_table)
+{
+	struct btf_type *type;
+	__u32 new_type_id = type_id;
+	__u32 cand_id;
+	struct btf_type *cand_type;
+	struct hashmap_entry *hash_entry;
+
+	type = btf_type_by_id(d->btf, type_id);
+	if (btf_kind(type) != BTF_KIND_FWD)
+		return 0;
+
+	if (d->map[type_id] != type_id && d->map[type_id] <= BTF_MAX_NR_TYPES)
+		return 0;
+
+	hashmap__for_each_key_entry(dedup_table, hash_entry, (void *)(long)type->name_off) {
+		cand_id = (__u32)(long)hash_entry->value;
+		cand_type = btf_type_by_id(d->btf, cand_id);
+		if (cand_type->name_off == type->name_off) {
+			new_type_id = cand_id;
+			break;
+		}
+	}
+
+	d->map[type_id] = new_type_id;
+
+	return 0;
+}
+
+static int btf_dedup_fwd_types(struct btf_dedup *d)
+{
+	struct hashmap *dedup_table;
+	struct btf_type *type;
+	int i, err;
+	hashmap_hash_fn hash_fn = btf_dedup_identity_hash_fn;
+
+	dedup_table = hashmap__new(hash_fn, btf_dedup_equal_fn, NULL);
+
+	for (i = 0; i < d->btf->nr_types; i++) {
+		__u32 type_id = d->btf->start_id + i;
+		type = btf_type_by_id(d->btf, type_id);
+		if (btf_kind(type) != BTF_KIND_STRUCT)
+			continue;
+		hashmap__append(dedup_table, (void *)(long)type->name_off, (void *)(long)type_id);
+	}
+
+	for (i = 0; i < d->btf->nr_types; i++) {
+		err = btf_dedup_fwd_type(d, d->btf->start_id + i, dedup_table);
+		if (err < 0)
+			return err;
+	}
+
+	hashmap__free(dedup_table);
 	return 0;
 }
 
